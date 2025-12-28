@@ -139,6 +139,7 @@ impl HexFile {
     }
 
     /// Divide all addresses by divisor. Errors if any address not evenly divisible.
+    /// If validation fails, no segments are modified (transactional).
     pub fn unscale_addresses(&mut self, divisor: u32) -> Result<(), OpsError> {
         if divisor == 0 {
             return Err(OpsError::AddressNotDivisible {
@@ -147,13 +148,18 @@ impl HexFile {
             });
         }
 
-        for segment in self.segments_mut() {
+        // First pass: validate all addresses
+        for segment in self.segments() {
             if segment.start_address % divisor != 0 {
                 return Err(OpsError::AddressNotDivisible {
                     address: segment.start_address,
                     divisor,
                 });
             }
+        }
+
+        // Second pass: apply mutation
+        for segment in self.segments_mut() {
             segment.start_address /= divisor;
         }
 
@@ -294,5 +300,137 @@ mod tests {
                 divisor: 2
             })
         ));
+    }
+
+    // --- Edge case tests ---
+
+    #[test]
+    fn test_align_causes_overlap() {
+        let mut hf = HexFile::with_segments(vec![
+            Segment::new(0x1001, vec![0xAA]),
+            Segment::new(0x1003, vec![0xBB]),
+        ]);
+        hf.align(&AlignOptions {
+            alignment: 4,
+            fill_byte: 0xFF,
+            align_length: false,
+        })
+        .unwrap();
+        // Both now start at 0x1000 - overlap
+        assert!(hf.normalized().is_err());
+        // But normalized_lossy should work (last wins)
+        let norm = hf.normalized_lossy();
+        assert_eq!(norm.segments().len(), 1);
+    }
+
+    #[test]
+    fn test_align_with_alignment_1() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(0x1001, vec![0xAA, 0xBB])]);
+        hf.align(&AlignOptions {
+            alignment: 1,
+            fill_byte: 0xFF,
+            align_length: true,
+        })
+        .unwrap();
+        // No change expected
+        assert_eq!(hf.segments()[0].start_address, 0x1001);
+        assert_eq!(hf.segments()[0].len(), 2);
+    }
+
+    #[test]
+    fn test_split_zero_size_noop() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0xAA; 10])]);
+        hf.split(0);
+        assert_eq!(hf.segments().len(), 1);
+    }
+
+    #[test]
+    fn test_split_larger_than_segment() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0xAA; 4])]);
+        hf.split(100);
+        assert_eq!(hf.segments().len(), 1);
+    }
+
+    #[test]
+    fn test_swap_multiple_segments() {
+        let mut hf = HexFile::with_segments(vec![
+            Segment::new(0x1000, vec![0x01, 0x02]),
+            Segment::new(0x2000, vec![0x03, 0x04]),
+        ]);
+        hf.swap_bytes(SwapMode::Word).unwrap();
+        assert_eq!(hf.segments()[0].data, vec![0x02, 0x01]);
+        assert_eq!(hf.segments()[1].data, vec![0x04, 0x03]);
+    }
+
+    #[test]
+    fn test_swap_dword_larger_buffer() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(
+            0x1000,
+            vec![0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08],
+        )]);
+        hf.swap_bytes(SwapMode::DWord).unwrap();
+        assert_eq!(
+            hf.segments()[0].data,
+            vec![0x04, 0x03, 0x02, 0x01, 0x08, 0x07, 0x06, 0x05]
+        );
+    }
+
+    #[test]
+    fn test_scale_unscale_roundtrip() {
+        let mut hf = HexFile::with_segments(vec![
+            Segment::new(0x1000, vec![0xAA]),
+            Segment::new(0x2000, vec![0xBB]),
+        ]);
+        let original = hf.clone();
+        hf.scale_addresses(4);
+        hf.unscale_addresses(4).unwrap();
+        assert_eq!(hf.segments()[0].start_address, original.segments()[0].start_address);
+        assert_eq!(hf.segments()[1].start_address, original.segments()[1].start_address);
+    }
+
+    #[test]
+    fn test_unscale_transactional() {
+        let mut hf = HexFile::with_segments(vec![
+            Segment::new(0x2000, vec![0xAA]), // divisible by 2
+            Segment::new(0x3001, vec![0xBB]), // NOT divisible by 2
+        ]);
+        let original_first = hf.segments()[0].start_address;
+        let result = hf.unscale_addresses(2);
+        assert!(result.is_err());
+        // First segment should NOT have been modified
+        assert_eq!(hf.segments()[0].start_address, original_first);
+    }
+
+    #[test]
+    fn test_scale_saturation() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(u32::MAX / 2 + 1, vec![0xAA])]);
+        hf.scale_addresses(3);
+        assert_eq!(hf.segments()[0].start_address, u32::MAX);
+    }
+
+    #[test]
+    fn test_unscale_by_zero() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0xAA])]);
+        let result = hf.unscale_addresses(0);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_align_then_split() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(0x1001, vec![0xAA; 15])]);
+        hf.align(&AlignOptions {
+            alignment: 4,
+            fill_byte: 0xFF,
+            align_length: true,
+        })
+        .unwrap();
+        // After align: start=0x1000, len=16 (1 prepend + 15 data)
+        // Actually: 0x1001 aligns down to 0x1000, prepend 1. length 16, aligned to 4 = 16.
+        hf.split(8);
+        assert_eq!(hf.segments().len(), 2);
+        assert_eq!(hf.segments()[0].start_address, 0x1000);
+        assert_eq!(hf.segments()[0].len(), 8);
+        assert_eq!(hf.segments()[1].start_address, 0x1008);
+        assert_eq!(hf.segments()[1].len(), 8);
     }
 }

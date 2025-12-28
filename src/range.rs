@@ -41,6 +41,12 @@ impl Range {
         if start > end {
             return Err(RangeError::StartExceedsEnd { start, end });
         }
+        // Reject full 4GiB range as length would overflow u32
+        if start == 0 && end == u32::MAX {
+            return Err(RangeError::InvalidFormat(
+                "range spans entire 4GiB address space".to_string(),
+            ));
+        }
         Ok(Self { start, end })
     }
 
@@ -237,5 +243,90 @@ mod tests {
             Range::from_start_end(0x2000, 0x1000),
             Err(RangeError::StartExceedsEnd { .. })
         ));
+    }
+
+    // --- Edge case tests ---
+
+    #[test]
+    fn test_full_4gib_range_rejected() {
+        assert!(matches!(
+            Range::from_start_end(0, u32::MAX),
+            Err(RangeError::InvalidFormat(_))
+        ));
+    }
+
+    #[test]
+    fn test_near_max_range_allowed() {
+        // 1 to MAX is allowed (length = MAX)
+        let r = Range::from_start_end(1, u32::MAX).unwrap();
+        assert_eq!(r.length(), u32::MAX);
+    }
+
+    #[test]
+    fn test_single_byte_range() {
+        let r = Range::from_start_end(0x1000, 0x1000).unwrap();
+        assert_eq!(r.length(), 1);
+        assert!(r.contains(0x1000));
+        assert!(!r.contains(0x1001));
+    }
+
+    #[test]
+    fn test_parse_u32_max() {
+        let r: Range = "0xFFFFFFFF,1".parse().unwrap();
+        assert_eq!(r.start(), u32::MAX);
+        assert_eq!(r.end(), u32::MAX);
+        assert_eq!(r.length(), 1);
+    }
+
+    #[test]
+    fn test_parse_overflow_number() {
+        let result: Result<Range, _> = "0x100000000,1".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_invalid_binary() {
+        let result: Result<Range, _> = "0b102,1".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_empty_string() {
+        let result: Result<Range, _> = "".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_malformed_comma() {
+        let result: Result<Range, _> = "0x1000,".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_malformed_dash() {
+        let result: Result<Range, _> = "0x1000-".parse();
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_parse_ranges_single() {
+        let ranges = parse_ranges("0x1000,0x100").unwrap();
+        assert_eq!(ranges.len(), 1);
+    }
+
+    #[test]
+    fn test_address_overflow_in_start_length() {
+        let result = Range::from_start_length(u32::MAX, 2);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_overlaps_single_byte_boundary() {
+        let r1 = Range::from_start_end(0x1000, 0x1000).unwrap();
+        let r2 = Range::from_start_end(0x1000, 0x1000).unwrap();
+        assert!(r1.overlaps(&r2));
+
+        let r3 = Range::from_start_end(0x1001, 0x1001).unwrap();
+        assert!(!r1.overlaps(&r3));
     }
 }

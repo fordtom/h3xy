@@ -155,6 +155,7 @@ impl HexFile {
 
     /// Fill all gaps between first and last segment with fill byte.
     /// Result: single contiguous segment.
+    /// Returns silently if the span is too large (>= 4GiB).
     pub fn fill_gaps(&mut self, fill_byte: u8) {
         let normalized = self.normalized_lossy();
         let Some(min_addr) = normalized.min_address() else {
@@ -164,7 +165,13 @@ impl HexFile {
             return;
         };
 
-        let total_len = (max_addr - min_addr + 1) as usize;
+        // Compute span in u64 to avoid overflow
+        let span = (max_addr as u64) - (min_addr as u64) + 1;
+        if span > usize::MAX as u64 {
+            return;
+        }
+
+        let total_len = span as usize;
         let mut data = vec![fill_byte; total_len];
 
         // Copy existing data into the buffer
@@ -216,7 +223,14 @@ impl HexFile {
             segment.start_address = if offset >= 0 {
                 segment.start_address.saturating_add(offset as u32)
             } else {
-                segment.start_address.saturating_sub((-offset) as u32)
+                // Handle i64::MIN safely by computing absolute value in u64
+                let abs = offset.unsigned_abs();
+                let abs_u32 = if abs > u32::MAX as u64 {
+                    u32::MAX
+                } else {
+                    abs as u32
+                };
+                segment.start_address.saturating_sub(abs_u32)
             };
         }
     }
@@ -404,5 +418,172 @@ mod tests {
 
         assert_eq!(norm.segments().len(), 2);
         assert_eq!(norm.segments()[1].start_address, 0x2000);
+    }
+
+    // --- Edge case tests ---
+
+    #[test]
+    fn test_filter_range_all_removed() {
+        let mut hf = HexFile::with_segments(vec![
+            Segment::new(0x1000, vec![0x01, 0x02]),
+            Segment::new(0x2000, vec![0x03, 0x04]),
+        ]);
+        hf.filter_range(Range::from_start_end(0x5000, 0x5FFF).unwrap());
+        assert!(hf.segments().is_empty());
+    }
+
+    #[test]
+    fn test_filter_ranges_empty_clears_all() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0x01, 0x02])]);
+        hf.filter_ranges(&[]);
+        assert!(hf.segments().is_empty());
+    }
+
+    #[test]
+    fn test_filter_ranges_overlapping() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0x01; 0x20])]);
+        hf.filter_ranges(&[
+            Range::from_start_end(0x1005, 0x1015).unwrap(),
+            Range::from_start_end(0x1010, 0x101A).unwrap(), // overlaps
+        ]);
+        let norm = hf.normalized_lossy();
+        // Should have data from 0x1005 to 0x101A
+        assert_eq!(norm.min_address(), Some(0x1005));
+        assert_eq!(norm.max_address(), Some(0x101A));
+    }
+
+    #[test]
+    fn test_cut_head_only() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0x01; 0x10])]);
+        hf.cut(Range::from_start_end(0x1000, 0x1003).unwrap());
+        assert_eq!(hf.segments()[0].start_address, 0x1004);
+        assert_eq!(hf.segments()[0].len(), 0x0C);
+    }
+
+    #[test]
+    fn test_cut_tail_only() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0x01; 0x10])]);
+        hf.cut(Range::from_start_end(0x100C, 0x100F).unwrap());
+        assert_eq!(hf.segments()[0].start_address, 0x1000);
+        assert_eq!(hf.segments()[0].len(), 0x0C);
+    }
+
+    #[test]
+    fn test_cut_multiple_ranges_on_single_segment() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0x01; 0x20])]);
+        hf.cut_ranges(&[
+            Range::from_start_end(0x1004, 0x1007).unwrap(),
+            Range::from_start_end(0x1010, 0x1013).unwrap(),
+        ]);
+        let norm = hf.normalized().unwrap();
+        assert_eq!(norm.segments().len(), 3);
+    }
+
+    #[test]
+    fn test_cut_spanning_multiple_segments() {
+        let mut hf = HexFile::with_segments(vec![
+            Segment::new(0x1000, vec![0x01; 0x10]),
+            Segment::new(0x1020, vec![0x02; 0x10]),
+        ]);
+        hf.cut(Range::from_start_end(0x1008, 0x1027).unwrap());
+        let norm = hf.normalized().unwrap();
+        assert_eq!(norm.segments().len(), 2);
+        assert_eq!(norm.segments()[0].end_address(), 0x1007);
+        assert_eq!(norm.segments()[1].start_address, 0x1028);
+    }
+
+    #[test]
+    fn test_fill_overwrite_partial() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0xAA; 8])]);
+        hf.fill(
+            Range::from_start_length(0x1002, 4).unwrap(),
+            &FillOptions {
+                pattern: vec![0xFF],
+                overwrite: true,
+            },
+        );
+        let norm = hf.normalized_lossy();
+        assert_eq!(
+            norm.segments()[0].data,
+            vec![0xAA, 0xAA, 0xFF, 0xFF, 0xFF, 0xFF, 0xAA, 0xAA]
+        );
+    }
+
+    #[test]
+    fn test_fill_gaps_with_overlapping_segments() {
+        let mut hf = HexFile::with_segments(vec![
+            Segment::new(0x1000, vec![0xAA, 0xBB, 0xCC]),
+            Segment::new(0x1001, vec![0xFF]), // overlaps
+        ]);
+        hf.fill_gaps(0x00);
+        let seg = &hf.segments()[0];
+        assert_eq!(seg.start_address, 0x1000);
+        // normalized_lossy: last wins, so 0x1001 = 0xFF
+        assert_eq!(seg.data, vec![0xAA, 0xFF, 0xCC]);
+    }
+
+    #[test]
+    fn test_fill_gaps_single_segment() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0xAA, 0xBB])]);
+        hf.fill_gaps(0xFF);
+        assert_eq!(hf.segments().len(), 1);
+        assert_eq!(hf.segments()[0].data, vec![0xAA, 0xBB]);
+    }
+
+    #[test]
+    fn test_merge_with_negative_offset() {
+        let mut hf1 = HexFile::with_segments(vec![Segment::new(0x1000, vec![0xAA])]);
+        let hf2 = HexFile::with_segments(vec![Segment::new(0x3000, vec![0xBB])]);
+
+        hf1.merge(
+            &hf2,
+            &MergeOptions {
+                offset: -0x1000,
+                ..Default::default()
+            },
+        );
+        let norm = hf1.normalized_lossy();
+        assert_eq!(norm.segments().len(), 2);
+        assert_eq!(norm.segments()[1].start_address, 0x2000);
+    }
+
+    #[test]
+    fn test_merge_with_range_filter() {
+        let mut hf1 = HexFile::new();
+        let hf2 = HexFile::with_segments(vec![
+            Segment::new(0x1000, vec![0xAA; 0x10]),
+            Segment::new(0x2000, vec![0xBB; 0x10]),
+        ]);
+
+        hf1.merge(
+            &hf2,
+            &MergeOptions {
+                range: Some(Range::from_start_end(0x2000, 0x2FFF).unwrap()),
+                ..Default::default()
+            },
+        );
+        assert_eq!(hf1.segments().len(), 1);
+        assert_eq!(hf1.segments()[0].start_address, 0x2000);
+    }
+
+    #[test]
+    fn test_offset_saturates_at_max() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(u32::MAX - 0x100, vec![0x01])]);
+        hf.offset_addresses(0x1000);
+        assert_eq!(hf.segments()[0].start_address, u32::MAX);
+    }
+
+    #[test]
+    fn test_offset_i64_min_handled() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0x01])]);
+        hf.offset_addresses(i64::MIN);
+        assert_eq!(hf.segments()[0].start_address, 0);
+    }
+
+    #[test]
+    fn test_offset_large_negative() {
+        let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0x01])]);
+        hf.offset_addresses(-0x1_0000_0000_i64); // > u32::MAX
+        assert_eq!(hf.segments()[0].start_address, 0);
     }
 }

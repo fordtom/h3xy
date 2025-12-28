@@ -36,8 +36,16 @@ impl HexFile {
         &self.segments
     }
 
+    pub fn segments_mut(&mut self) -> &mut Vec<Segment> {
+        &mut self.segments
+    }
+
     pub fn into_segments(self) -> Vec<Segment> {
         self.segments
+    }
+
+    pub fn set_segments(&mut self, segments: Vec<Segment>) {
+        self.segments = segments;
     }
 
     pub fn add_segment(&mut self, segment: Segment) {

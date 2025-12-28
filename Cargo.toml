@@ -1,0 +1,9 @@
+[package]
+name = "h3xy"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = "4.5.53"
+crc = "3.4.0"
+thiserror = "2.0.17"

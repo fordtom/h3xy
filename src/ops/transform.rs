@@ -129,11 +129,25 @@ impl HexFile {
         Ok(())
     }
 
-    /// Multiply all addresses by factor.
-    pub fn scale_addresses(&mut self, factor: u32) {
-        for segment in self.segments_mut() {
-            segment.start_address = segment.start_address.saturating_mul(factor);
+    /// Multiply all addresses by factor. Errors if any address would overflow.
+    /// If validation fails, no segments are modified (transactional).
+    pub fn scale_addresses(&mut self, factor: u32) -> Result<(), OpsError> {
+        // First pass: validate all addresses
+        for segment in self.segments() {
+            segment.start_address.checked_mul(factor).ok_or_else(|| {
+                OpsError::AddressOverflow(format!(
+                    "{:#X} * {} overflows u32",
+                    segment.start_address, factor
+                ))
+            })?;
         }
+
+        // Second pass: apply mutation
+        for segment in self.segments_mut() {
+            segment.start_address *= factor;
+        }
+
+        Ok(())
     }
 
     /// Divide all addresses by divisor. Errors if any address not evenly divisible.
@@ -270,7 +284,7 @@ mod tests {
             Segment::new(0x1000, vec![0xAA]),
             Segment::new(0x2000, vec![0xBB]),
         ]);
-        hf.scale_addresses(2);
+        hf.scale_addresses(2).unwrap();
 
         assert_eq!(hf.segments()[0].start_address, 0x2000);
         assert_eq!(hf.segments()[1].start_address, 0x4000);
@@ -382,7 +396,7 @@ mod tests {
             Segment::new(0x2000, vec![0xBB]),
         ]);
         let original = hf.clone();
-        hf.scale_addresses(4);
+        hf.scale_addresses(4).unwrap();
         hf.unscale_addresses(4).unwrap();
         assert_eq!(
             hf.segments()[0].start_address,
@@ -408,10 +422,13 @@ mod tests {
     }
 
     #[test]
-    fn test_scale_saturation() {
+    fn test_scale_overflow_errors() {
         let mut hf = HexFile::with_segments(vec![Segment::new(u32::MAX / 2 + 1, vec![0xAA])]);
-        hf.scale_addresses(3);
-        assert_eq!(hf.segments()[0].start_address, u32::MAX);
+        let original_addr = hf.segments()[0].start_address;
+        let result = hf.scale_addresses(3);
+        assert!(matches!(result, Err(OpsError::AddressOverflow(_))));
+        // Unchanged (transactional)
+        assert_eq!(hf.segments()[0].start_address, original_addr);
     }
 
     #[test]

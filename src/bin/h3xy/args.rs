@@ -325,7 +325,7 @@ impl Args {
                 offset: merge.offset.unwrap_or(0),
                 range: None,
             };
-            hexfile.merge(&other, &options);
+            hexfile.merge(&other, &options)?;
         }
         for merge in &self.merge_opaque {
             let other = load_input(&merge.file)?;
@@ -334,7 +334,7 @@ impl Args {
                 offset: merge.offset.unwrap_or(0),
                 range: None,
             };
-            hexfile.merge(&other, &options);
+            hexfile.merge(&other, &options)?;
         }
 
         // Address range filter (/AR)

@@ -1,3 +1,4 @@
+use super::OpsError;
 use crate::{HexFile, Range, Segment};
 
 /// Options for fill operations.
@@ -184,7 +185,7 @@ impl HexFile {
     }
 
     /// Merge another file into this one.
-    pub fn merge(&mut self, other: &HexFile, options: &MergeOptions) {
+    pub fn merge(&mut self, other: &HexFile, options: &MergeOptions) -> Result<(), OpsError> {
         let mut other_filtered = other.clone();
 
         // Apply range filter if specified
@@ -194,7 +195,7 @@ impl HexFile {
 
         // Apply offset
         if options.offset != 0 {
-            other_filtered.offset_addresses(options.offset);
+            other_filtered.offset_addresses(options.offset)?;
         }
 
         match options.mode {
@@ -211,26 +212,34 @@ impl HexFile {
                 }
             }
         }
+
+        Ok(())
     }
 
-    /// Add offset to all segment addresses.
-    /// Saturates at 0 for negative offsets that would go below 0.
-    /// Saturates at u32::MAX for positive offsets that would overflow.
-    pub fn offset_addresses(&mut self, offset: i64) {
-        for segment in self.segments_mut() {
-            segment.start_address = if offset >= 0 {
-                segment.start_address.saturating_add(offset as u32)
-            } else {
-                // Handle i64::MIN safely by computing absolute value in u64
-                let abs = offset.unsigned_abs();
-                let abs_u32 = if abs > u32::MAX as u64 {
-                    u32::MAX
-                } else {
-                    abs as u32
-                };
-                segment.start_address.saturating_sub(abs_u32)
-            };
+    /// Add offset to all segment addresses. Errors if any address would overflow or underflow.
+    /// If validation fails, no segments are modified (transactional).
+    pub fn offset_addresses(&mut self, offset: i64) -> Result<(), OpsError> {
+        // First pass: validate all addresses
+        for segment in self.segments() {
+            let new_addr = (segment.start_address as i64).checked_add(offset);
+
+            match new_addr {
+                Some(addr) if addr >= 0 && addr <= u32::MAX as i64 => {}
+                _ => {
+                    return Err(OpsError::AddressOverflow(format!(
+                        "{:#X} + {} is out of u32 range",
+                        segment.start_address, offset
+                    )));
+                }
+            }
         }
+
+        // Second pass: apply mutation
+        for segment in self.segments_mut() {
+            segment.start_address = ((segment.start_address as i64) + offset) as u32;
+        }
+
+        Ok(())
     }
 }
 
@@ -353,22 +362,24 @@ mod tests {
     #[test]
     fn test_offset_positive() {
         let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0x01])]);
-        hf.offset_addresses(0x1000);
+        hf.offset_addresses(0x1000).unwrap();
         assert_eq!(hf.segments()[0].start_address, 0x2000);
     }
 
     #[test]
     fn test_offset_negative() {
         let mut hf = HexFile::with_segments(vec![Segment::new(0x2000, vec![0x01])]);
-        hf.offset_addresses(-0x1000);
+        hf.offset_addresses(-0x1000).unwrap();
         assert_eq!(hf.segments()[0].start_address, 0x1000);
     }
 
     #[test]
-    fn test_offset_saturates_at_zero() {
+    fn test_offset_underflow_errors() {
         let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0x01])]);
-        hf.offset_addresses(-0x2000);
-        assert_eq!(hf.segments()[0].start_address, 0);
+        let result = hf.offset_addresses(-0x2000);
+        assert!(matches!(result, Err(OpsError::AddressOverflow(_))));
+        // Segment unchanged (transactional)
+        assert_eq!(hf.segments()[0].start_address, 0x1000);
     }
 
     #[test]
@@ -376,7 +387,7 @@ mod tests {
         let mut hf1 = HexFile::with_segments(vec![Segment::new(0x1000, vec![0xAA, 0xBB])]);
         let hf2 = HexFile::with_segments(vec![Segment::new(0x1001, vec![0xFF])]);
 
-        hf1.merge(&hf2, &MergeOptions::default());
+        hf1.merge(&hf2, &MergeOptions::default()).unwrap();
         let norm = hf1.normalized_lossy();
 
         assert_eq!(norm.segments()[0].data, vec![0xAA, 0xFF]);
@@ -393,7 +404,8 @@ mod tests {
                 mode: MergeMode::Preserve,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let norm = hf1.normalized_lossy();
 
         assert_eq!(norm.segments()[0].data, vec![0xAA, 0xBB]);
@@ -410,7 +422,8 @@ mod tests {
                 offset: 0x2000,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let norm = hf1.normalized_lossy();
 
         assert_eq!(norm.segments().len(), 2);
@@ -538,7 +551,8 @@ mod tests {
                 offset: -0x1000,
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         let norm = hf1.normalized_lossy();
         assert_eq!(norm.segments().len(), 2);
         assert_eq!(norm.segments()[1].start_address, 0x2000);
@@ -558,29 +572,32 @@ mod tests {
                 range: Some(Range::from_start_end(0x2000, 0x2FFF).unwrap()),
                 ..Default::default()
             },
-        );
+        )
+        .unwrap();
         assert_eq!(hf1.segments().len(), 1);
         assert_eq!(hf1.segments()[0].start_address, 0x2000);
     }
 
     #[test]
-    fn test_offset_saturates_at_max() {
+    fn test_offset_overflow_errors() {
         let mut hf = HexFile::with_segments(vec![Segment::new(u32::MAX - 0x100, vec![0x01])]);
-        hf.offset_addresses(0x1000);
-        assert_eq!(hf.segments()[0].start_address, u32::MAX);
+        let result = hf.offset_addresses(0x1000);
+        assert!(matches!(result, Err(OpsError::AddressOverflow(_))));
+        // Unchanged
+        assert_eq!(hf.segments()[0].start_address, u32::MAX - 0x100);
     }
 
     #[test]
-    fn test_offset_i64_min_handled() {
+    fn test_offset_i64_min_errors() {
         let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0x01])]);
-        hf.offset_addresses(i64::MIN);
-        assert_eq!(hf.segments()[0].start_address, 0);
+        let result = hf.offset_addresses(i64::MIN);
+        assert!(matches!(result, Err(OpsError::AddressOverflow(_))));
     }
 
     #[test]
-    fn test_offset_large_negative() {
+    fn test_offset_large_negative_errors() {
         let mut hf = HexFile::with_segments(vec![Segment::new(0x1000, vec![0x01])]);
-        hf.offset_addresses(-0x1_0000_0000_i64); // > u32::MAX
-        assert_eq!(hf.segments()[0].start_address, 0);
+        let result = hf.offset_addresses(-0x1_0000_0000_i64); // > u32::MAX
+        assert!(matches!(result, Err(OpsError::AddressOverflow(_))));
     }
 }

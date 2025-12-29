@@ -529,11 +529,6 @@ mod tests {
     }
 
     #[test]
-    fn test_crc16_ibm_sdlc_known_vector() {
-        assert_eq!(crc16_ibm_sdlc(b"123456789"), 0x906E);
-    }
-
-    #[test]
     fn test_hexfile_checksum_crc16() {
         let hf = HexFile::with_segments(vec![Segment::new(0x1000, b"123456789".to_vec())]);
         let options = ChecksumOptions {

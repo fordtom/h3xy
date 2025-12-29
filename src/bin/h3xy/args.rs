@@ -250,42 +250,60 @@ impl Args {
         Ok(result)
     }
 
+    fn validate_supported_features(&self) -> Result<(), Box<dyn std::error::Error>> {
+        if self.error_log.is_some() {
+            return Err("error logging (/E) is not supported yet".into());
+        }
+        if self.import_i16.is_some() {
+            return Err("16-bit Intel HEX import (/II2) is not supported yet".into());
+        }
+        if self.s08_map {
+            return Err("S08 address mapping is not supported yet".into());
+        }
+        if self.s12_map {
+            return Err("S12 address mapping (/S12MAP) is not supported yet".into());
+        }
+        if self.s12x_map {
+            return Err("S12X address mapping (/S12XMAP) is not supported yet".into());
+        }
+        if self.remap.is_some() {
+            return Err("manual remap (/REMAP) is not supported yet".into());
+        }
+        if self.log_file.is_some() {
+            return Err("log/macro files (/L) are not supported yet".into());
+        }
+        if self.postbuild.is_some() {
+            return Err("postbuild (/PB) is not supported yet".into());
+        }
+        if !self.dspic_expand.is_empty() {
+            return Err("dsPIC expand is not supported yet".into());
+        }
+        if !self.dspic_shrink.is_empty() {
+            return Err("dsPIC shrink is not supported yet".into());
+        }
+        if !self.dspic_clear_ghost.is_empty() {
+            return Err("dsPIC clear ghost is not supported yet".into());
+        }
+        if self.checksum.is_some() {
+            return Err("checksum operations (/CS) are not supported yet".into());
+        }
+        if self.data_processing.is_some() {
+            return Err("data processing (/DP) is not supported yet".into());
+        }
+        Ok(())
+    }
+
     /// Execute the parsed arguments in HexView processing order.
     pub fn execute(&self) -> Result<(), Box<dyn std::error::Error>> {
-        // 1. Read input file
+        self.validate_supported_features()?;
+
         let mut hexfile = if let Some(ref path) = self.input_file {
             load_input(path)?
         } else {
             return Err(ParseArgError::MissingInputFile.into());
         };
 
-        // 2. Open error log (/E)
-        if let Some(ref _path) = self.error_log {
-            // TODO: set up error logging
-        }
-
-        // 3. Silent mode (/S) - already handled by flag
-
-        // 4. Import 16-bit Hex (/II2)
-        if let Some(ref _path) = self.import_i16 {
-            // TODO: import and merge 16-bit Intel HEX
-        }
-
-        // 5. Address mapping (/s12map, /remap, etc.)
-        if self.s08_map {
-            // TODO: apply S08 address mapping
-        }
-        if self.s12_map {
-            // TODO: apply S12 address mapping
-        }
-        if self.s12x_map {
-            // TODO: apply S12X address mapping
-        }
-        if let Some(ref _remap) = self.remap {
-            // TODO: apply manual remap
-        }
-
-        // 6. Fill ranges (/FR)
+        // Fill ranges (/FR)
         for range in &self.fill_ranges {
             let options = FillOptions {
                 pattern: self.fill_pattern.clone(),
@@ -294,12 +312,12 @@ impl Args {
             hexfile.fill(*range, &options);
         }
 
-        // 7. Cut ranges (/CR)
+        // Cut ranges (/CR)
         for range in &self.cut_ranges {
             hexfile.cut(*range);
         }
 
-        // 8. Merge files (/MT, /MO)
+        // Merge files (/MT, /MO)
         for merge in &self.merge_transparent {
             let other = load_input(&merge.file)?;
             let options = MergeOptions {
@@ -319,27 +337,17 @@ impl Args {
             hexfile.merge(&other, &options);
         }
 
-        // 9. Address range filter (/AR)
+        // Address range filter (/AR)
         if !self.address_range.is_empty() {
             hexfile.filter_ranges(&self.address_range);
         }
 
-        // 10. Execute log commands (/L)
-        if let Some(ref _path) = self.log_file {
-            // TODO: execute HexView log/macro file
-        }
-
-        // 11. Create single-region (/FA)
+        // Create single-region (/FA)
         if self.fill_all {
             hexfile.fill_gaps(self.align_fill);
         }
 
-        // 12. Postbuild (/PB)
-        if let Some(ref _path) = self.postbuild {
-            // TODO: run postbuild operations
-        }
-
-        // 13. Align (/AD, /AL)
+        // Align (/AD, /AL)
         if let Some(alignment) = self.align_address {
             let options = h3xy::AlignOptions {
                 alignment,
@@ -347,20 +355,6 @@ impl Args {
                 align_length: self.align_length,
             };
             hexfile.align(&options)?;
-        }
-
-        // dsPIC operations (order TBD based on HexView docs)
-        for op in &self.dspic_expand {
-            // TODO: expand dsPIC data
-            let _ = op;
-        }
-        for op in &self.dspic_shrink {
-            // TODO: shrink dsPIC data
-            let _ = op;
-        }
-        for range in &self.dspic_clear_ghost {
-            // TODO: clear ghost bytes
-            let _ = range;
         }
 
         // Split blocks
@@ -376,17 +370,7 @@ impl Args {
             hexfile.swap_bytes(h3xy::SwapMode::DWord)?;
         }
 
-        // 14. Checksum (/CS)
-        if let Some(ref _cs) = self.checksum {
-            // TODO: calculate and insert checksum
-        }
-
-        // 15. Data processing (/DP)
-        if let Some(ref _dp) = self.data_processing {
-            // TODO: run external data processing
-        }
-
-        // 16. Export (/Xx)
+        // Export
         if let Some(ref path) = self.output_file {
             write_output(&hexfile, path, &self.output_format, self.bytes_per_line)?;
         }

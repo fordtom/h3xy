@@ -75,10 +75,7 @@ impl HexFile {
                 let current_len = segment.data.len() as u32;
                 let aligned_len = align_up(current_len, options.alignment);
                 if aligned_len > current_len {
-                    segment.data.extend(std::iter::repeat_n(
-                        options.fill_byte,
-                        (aligned_len - current_len) as usize,
-                    ));
+                    segment.data.resize(aligned_len as usize, options.fill_byte);
                 }
             }
         }

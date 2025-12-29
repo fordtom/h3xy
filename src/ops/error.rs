@@ -2,9 +2,6 @@ use thiserror::Error;
 
 #[derive(Debug, Error)]
 pub enum OpsError {
-    #[error("address overflow during offset operation")]
-    AddressOverflow,
-
     #[error("address {address:#X} not divisible by {divisor}")]
     AddressNotDivisible { address: u32, divisor: u32 },
 

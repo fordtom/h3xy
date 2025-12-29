@@ -74,9 +74,17 @@ pub fn parse_intel_hex(input: &[u8]) -> Result<HexFile, ParseError> {
         validate_checksum(&bytes, line_num)?;
 
         let byte_count = bytes[0] as usize;
-        let address = u16::from_be_bytes([bytes[1], bytes[2]]);
-        let record_type = bytes[3];
-        let data = &bytes[4..4 + byte_count];
+
+        if bytes.len() < 5 + byte_count {
+            return Err(ParseError::InvalidRecord {
+                line: line_num,
+                message: format!(
+                    "byte count too large: header says {}, but record only has {} data bytes",
+                    byte_count,
+                    bytes.len().saturating_sub(5),
+                ),
+            });
+        }
 
         if bytes.len() != 5 + byte_count {
             return Err(ParseError::InvalidRecord {
@@ -89,11 +97,21 @@ pub fn parse_intel_hex(input: &[u8]) -> Result<HexFile, ParseError> {
             });
         }
 
+        let address = u16::from_be_bytes([bytes[1], bytes[2]]);
+        let record_type = bytes[3];
+        let data = &bytes[4..4 + byte_count];
+
         match record_type {
             RECORD_DATA => {
                 let full_address = extended_address
                     .checked_add(address as u32)
                     .ok_or_else(|| ParseError::AddressOverflow(format!("line {line_num}")))?;
+
+                if byte_count > 0 {
+                    full_address
+                        .checked_add(byte_count as u32 - 1)
+                        .ok_or_else(|| ParseError::AddressOverflow(format!("line {line_num}")))?;
+                }
 
                 match &mut current_segment {
                     Some(seg) if seg.end_address() + 1 == full_address => {
@@ -256,33 +274,32 @@ fn write_hex_byte(output: &mut Vec<u8>, byte: u8) {
 }
 
 fn parse_hex_bytes(hex_str: &str, line_num: usize) -> Result<Vec<u8>, ParseError> {
-    if !hex_str.len().is_multiple_of(2) {
+    let bytes = hex_str.as_bytes();
+    if !bytes.len().is_multiple_of(2) {
         return Err(ParseError::InvalidRecord {
             line: line_num,
             message: "odd number of hex digits".to_string(),
         });
     }
 
-    let mut bytes = Vec::with_capacity(hex_str.len() / 2);
-    let chars: Vec<char> = hex_str.chars().collect();
-
-    for i in (0..chars.len()).step_by(2) {
-        let high = hex_digit(chars[i], line_num)?;
-        let low = hex_digit(chars[i + 1], line_num)?;
-        bytes.push((high << 4) | low);
+    let mut out = Vec::with_capacity(bytes.len() / 2);
+    for chunk in bytes.chunks_exact(2) {
+        let high = hex_digit(chunk[0], line_num)?;
+        let low = hex_digit(chunk[1], line_num)?;
+        out.push((high << 4) | low);
     }
 
-    Ok(bytes)
+    Ok(out)
 }
 
-fn hex_digit(c: char, line_num: usize) -> Result<u8, ParseError> {
-    match c {
-        '0'..='9' => Ok(c as u8 - b'0'),
-        'A'..='F' => Ok(c as u8 - b'A' + 10),
-        'a'..='f' => Ok(c as u8 - b'a' + 10),
+fn hex_digit(b: u8, line_num: usize) -> Result<u8, ParseError> {
+    match b {
+        b'0'..=b'9' => Ok(b - b'0'),
+        b'A'..=b'F' => Ok(b - b'A' + 10),
+        b'a'..=b'f' => Ok(b - b'a' + 10),
         _ => Err(ParseError::InvalidHexDigit {
             line: line_num,
-            char: c,
+            char: b as char,
         }),
     }
 }

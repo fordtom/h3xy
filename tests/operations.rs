@@ -43,7 +43,7 @@ fn test_merge_align_normalize_overwrite() {
     let hf2 = HexFile::with_segments(vec![Segment::new(0x1003, vec![0xBB; 4])]);
 
     // Merge with overwrite mode
-    hf1.merge(&hf2, &MergeOptions::default());
+    hf1.merge(&hf2, &MergeOptions::default()).unwrap();
 
     // Align to 4 bytes
     hf1.align(&AlignOptions {
@@ -76,7 +76,8 @@ fn test_merge_align_normalize_preserve() {
             mode: MergeMode::Preserve,
             ..Default::default()
         },
-    );
+    )
+    .unwrap();
 
     let norm = hf1.normalized_lossy();
 
@@ -96,7 +97,7 @@ fn test_scale_unscale_roundtrip() {
     ]);
 
     let mut hf = original.clone();
-    hf.scale_addresses(4);
+    hf.scale_addresses(4).unwrap();
 
     // Check scaled addresses
     assert_eq!(hf.segments()[0].start_address, 0x4000);
@@ -172,7 +173,7 @@ fn test_fill_gaps_then_merge_overwrite() {
     let hf_b = HexFile::with_segments(vec![Segment::new(0x1008, vec![0xCC; 4])]);
 
     // Merge with overwrite
-    hf_a.merge(&hf_b, &MergeOptions::default());
+    hf_a.merge(&hf_b, &MergeOptions::default()).unwrap();
 
     let norm = hf_a.normalized_lossy();
 
@@ -207,7 +208,8 @@ fn test_fill_gaps_then_merge_preserve() {
             mode: MergeMode::Preserve,
             ..Default::default()
         },
-    );
+    )
+    .unwrap();
 
     let norm = hf_a.normalized_lossy();
 
@@ -295,12 +297,12 @@ fn test_filter_cut_fill_align_split() {
 fn test_operations_on_empty_file() {
     let mut hf = HexFile::new();
 
-    // None of these should panic
+    // None of these should panic (scale/offset on empty are no-ops)
     hf.filter_range(Range::from_start_end(0x1000, 0x1FFF).unwrap());
     hf.cut(Range::from_start_end(0x1000, 0x1FFF).unwrap());
     hf.fill_gaps(0xFF);
-    hf.scale_addresses(2);
-    hf.offset_addresses(0x1000);
+    hf.scale_addresses(2).unwrap();
+    hf.offset_addresses(0x1000).unwrap();
     hf.split(16);
     hf.align(&AlignOptions::default()).unwrap();
 
